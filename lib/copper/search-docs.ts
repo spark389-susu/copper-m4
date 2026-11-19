@@ -65,7 +65,8 @@ export async function searchDocs(query: string): Promise<DocSearch> {
   } catch {
     return {
       status: "unavailable",
-      message: "The documents can't be searched right now. Please try again shortly.",
+      message:
+        "The documents can't be searched right now. Please try again shortly.",
     };
   }
 

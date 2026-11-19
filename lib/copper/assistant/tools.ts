@@ -185,6 +185,10 @@ export const searchDocsInput: z.ZodType<SearchDocsInput> = z
   .object({ query: z.string().trim().min(1).max(300) })
   .strict();
 
+export const transferToRefundInput = z
+  .object({ summary: z.string().trim().min(1).max(300) })
+  .strict();
+
 export const copperTools = {
   get_products: tool({
     description:
@@ -214,5 +218,15 @@ export const copperTools = {
       "Searches Copper's customer documents (the Copper Home and Copper Notes user guides, the terms and conditions and the Copper Plus FAQ) for setup, troubleshooting, warranty and policy questions, such as error codes, resets, refunds and cancellations. Returns the 5 closest passages, each with its document title, page number and a link that opens the PDF at that page.",
     inputSchema: searchDocsInput,
     execute: async ({ query }) => searchDocs(query),
+  }),
+  transfer_to_refund_agent: tool({
+    description:
+      "Passes the customer to the Copper Refund agent when they ask for a refund or to return something. This assistant can never refund anything itself. Give a one-line summary of the request.",
+    inputSchema: transferToRefundInput,
+    execute: async ({ summary }) => ({
+      transferred: true as const,
+      to: "refund" as const,
+      summary,
+    }),
   }),
 };

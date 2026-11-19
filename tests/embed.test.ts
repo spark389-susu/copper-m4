@@ -36,11 +36,17 @@ afterEach(() => {
 describe("callEmbed", () => {
   it("returns one embedding per text, in order, and logs the call", async () => {
     embedMany.mockResolvedValue({
-      embeddings: [[1, 0], [0, 1]],
+      embeddings: [
+        [1, 0],
+        [0, 1],
+      ],
       usage: { tokens: 12 },
     });
     const result = await callEmbed(info, ["a", "b"], options);
-    expect(result.embeddings).toEqual([[1, 0], [0, 1]]);
+    expect(result.embeddings).toEqual([
+      [1, 0],
+      [0, 1],
+    ]);
     expect(result.tokens).toBe(12);
     expect(logged).toHaveLength(1);
     expect(logged[0]).toMatchObject({

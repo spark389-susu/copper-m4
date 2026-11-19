@@ -125,3 +125,46 @@ Citations: Copper writes each source as `[Document title, p. N]`. `ReplyText` in
 a link that opens that PDF page. The link is built from `DOCUMENTS`, not taken
 from the model, so a made-up title stays plain text and a link the model adds
 itself is ignored.
+
+## Module 4: the Copper Refund agent
+
+**Summary:** A second agent that handles refund requests. Ask Copper (the
+support agent) hands refund requests to it with `transfer_to_refund_agent`, and
+the refund agent can hand the customer back with `transfer_to_support_agent`.
+It refunds automatically only in clear, low-risk cases (an order under $50,
+changed their mind, inside 30 days); everything else goes to a person. The
+full spec is in `docs/refund-agent-spec.md`.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Refund tools and rules | `lib/copper/assistant/refund-tools.ts` | `get_orders`, `check_refund_policy`, `check_refund_eligibility`, `issue_refund`, `escalate_to_human`, `transfer_to_support_agent`. The $50 limit and 30-day window are constants here; `issue_refund` re-checks them itself; the customer comes from the server, never the model |
+| Instructions | `lib/copper/assistant/refund-instructions.ts` | `REFUND_INSTRUCTIONS`: how the agent talks and which tool to use when |
+| Handoffs | `lib/copper/assistant/agents.ts`, `ask.ts` | `askCopper()` runs one agent at a time and switches when a transfer tool is called, at most `MAX_HANDOFFS` (2) per question |
+| Data | `lib/copper/orders.ts`, `lib/copper/supabase.ts`, `supabase/schema.sql` | Orders, the refund ledger and the limit. In Supabase (tables `orders`, `refund_events`, `settings`) when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set; otherwise in memory with the sample orders in `lib/copper/data/orders.json`, which resets when the server restarts. Nothing real is refunded |
+| AI calls | `{ module: 4, feature: "refund-agent" }` | One streamed call per refund-agent turn, through `lib/ai/call.ts` |
+
+### Module 4: the Support page and Refund Console
+
+The page at `/support` has the Refund Console on the left and Ask Copper docked
+on the right, so a manager can watch a refund happen. (`/manager` redirects
+here.) It has no password, because the class assignment needs a grader to open
+it: anyone with the link can change the limit and approve or reject requests.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Page | `app/support/page.tsx` | Three cards: the refund limit, requests waiting for approval (Approve / Reject), and the full refund history |
+| Server Actions | `app/support/actions.ts` | `updateLimit`, `decideRefund`, and `checkRequests` (the chat uses it to look up a decision) |
+| Docked chat | `components/copper/ask-copper.tsx` (`docked`), `components/copper/support/refreshing-chat.tsx` | The same chat, drawn in the page. It refreshes the console after each answer, and when a person decides a request it adds a message telling the customer (approved, or rejected with no refund) |
+| Limit and ledger | `lib/copper/orders.ts` | `getRefundLimit` / `setRefundLimit` (default $50, at most $1000) and the ledger: each entry is an automatic refund or a request, later `approved` or `denied` by a manager |
+
+The agent reads the limit from the same store, and the limit is still never a
+tool input. Approving a request refunds the order at its price (a manager may
+approve over the limit); rejecting it makes the agent treat the order as already
+reviewed. With Supabase connected, the limit and the history are saved there;
+without it they stay in memory and reset when the server restarts.
+
+Setup for Supabase: run `supabase/schema.sql` once in the Supabase SQL Editor
+(it creates the three tables, locks them with row level security so only the
+server's service-role key can use them, and adds the sample orders), then set
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env.local` and Vercel. The
+service-role key is a secret: it is only read in `lib/copper/supabase.ts`.

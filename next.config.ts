@@ -4,6 +4,10 @@ const nextConfig: NextConfig = {
   /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  async redirects() {
+    // The refund console used to be at /manager.
+    return [{ source: "/manager", destination: "/support", permanent: false }];
+  },
   turbopack: {
     rules: {
       "*.css": {

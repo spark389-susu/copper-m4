@@ -30,12 +30,32 @@ import { readLive } from "@/lib/ai/live";
 import { askCopper, type ChatMessage } from "@/lib/copper/assistant/ask";
 import {
   type Progress,
+  type RequestUpdate,
+  toolCallsOf,
   type ToolStep,
+  REFUND_TOOL_LABELS,
   TOOL_LABELS,
 } from "@/lib/copper/assistant/progress";
 import { formatUsd, getPlans, getProducts } from "@/lib/copper/catalog";
 import { DOCUMENTS } from "@/lib/copper/documents";
 import { cn } from "@/lib/utils";
+
+// Extra suggestions on the Support page, where refunds are the point.
+const REFUND_STARTERS = [
+  "I want a refund for my Copper Home Charging Dock, I changed my mind.",
+  "I want a refund for my Copper Home. It stopped working.",
+];
+
+/** What Copper tells the customer once a person has decided their refund. */
+function decisionMessage(update: RequestUpdate): string {
+  const note = update.note ? `\n\nNote from our team: ${update.note}` : "";
+  if (update.decision === "approved") {
+    const amount =
+      update.amount_usd === null ? "" : ` ${formatUsd(update.amount_usd)}`;
+    return `Good news! Our team approved your refund for the ${update.product}.${amount ? ` The${amount} is being refunded to you.` : ""}${note}`;
+  }
+  return `I'm sorry, our team reviewed your request and rejected the refund for the ${update.product}, so no refund was issued.${note}`;
+}
 
 const STARTERS = [
   "How much is Copper Home with Copper Plus, paid yearly, for 2 years?",
@@ -43,13 +63,32 @@ const STARTERS = [
   "Is Copper Plus cheaper monthly or yearly?",
 ];
 
-type Turn = { question: string; progress: Progress };
+type Turn = {
+  question: string;
+  progress: Progress;
+  /** A message Copper adds on its own (a manager's decision), not an answer. */
+  notice?: boolean;
+};
 type Chats = { tools: Turn[]; noTools: Turn[] };
 
 const WORKING: Progress = { steps: [], reply: "", status: "working" };
 
-export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
+export function AskCopper({
+  aiConfigured,
+  docked = false,
+  onActivity,
+  checkRequests,
+}: {
+  aiConfigured: boolean;
+  /** Draw the chat as a fixed panel in the page (the Support page), not a pop-out. */
+  docked?: boolean;
+  /** Called after each answer and each decision, so the page can refresh. */
+  onActivity?: () => void;
+  /** Looks up the manager's decision on requests the agent sent to a person. */
+  checkRequests?: (ids: number[]) => Promise<RequestUpdate[]>;
+}) {
   const [open, setOpen] = useState(false);
+  const [watching, setWatching] = useState<number[]>([]);
   const [useTools, setUseTools] = useState(true);
   const [chats, setChats] = useState<Chats>({ tools: [], noTools: [] });
   const [draft, setDraft] = useState("");
@@ -79,6 +118,49 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
     if (body.current) body.current.scrollTop = body.current.scrollHeight;
   }, [chats, useTools]);
 
+  // After Copper passes a refund to a person, watch for their decision and
+  // tell the customer in the chat as soon as it is made.
+  useEffect(() => {
+    if (!checkRequests || watching.length === 0) return;
+    let stopped = false;
+    const timer = setInterval(async () => {
+      try {
+        const updates = await checkRequests(watching);
+        if (stopped) return;
+        const decided = updates.filter(
+          (u) => u.decision === "approved" || u.decision === "denied",
+        );
+        if (decided.length === 0) return;
+        setWatching((ids) =>
+          ids.filter((id) => !decided.some((u) => u.id === id)),
+        );
+        setChats((all) => ({
+          ...all,
+          tools: [
+            ...all.tools,
+            ...decided.map((u): Turn => ({
+              question: "",
+              notice: true,
+              progress: {
+                steps: [],
+                reply: decisionMessage(u),
+                status: "done",
+                agent: "refund",
+              },
+            })),
+          ],
+        }));
+        onActivity?.();
+      } catch {
+        // Try again on the next tick.
+      }
+    }, 2500);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [watching, checkRequests, onActivity]);
+
   async function send(question: string) {
     question = question.trim();
     if (!question || busy) return;
@@ -87,10 +169,14 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
     const index = turns.length;
     // Only finished turns go to the model: questions and Copper's replies.
     const messages: ChatMessage[] = [
-      ...turns.flatMap(({ question, progress }): ChatMessage[] => [
-        { role: "user", content: question },
-        { role: "assistant", content: progress.reply },
-      ]),
+      ...turns.flatMap(({ question, progress, notice }): ChatMessage[] =>
+        notice
+          ? []
+          : [
+              { role: "user", content: question },
+              { role: "assistant", content: progress.reply },
+            ],
+      ),
       { role: "user", content: question },
     ];
     const setProgress = (progress: Progress) =>
@@ -105,11 +191,31 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
       [chat]: [...all[chat], { question, progress: WORKING }],
     }));
     try {
+      // Whichever agent answered last keeps the conversation.
+      const agent = turns.at(-1)?.progress.agent ?? "support";
       const { progress } = await askCopper({
         messages,
         useTools: chat === "tools",
+        ...(agent !== "support" && { agent }),
       });
-      for await (const update of readLive(progress)) setProgress(update);
+      let final: Progress | undefined;
+      for await (const update of readLive(progress)) {
+        final = update;
+        setProgress(update);
+      }
+      // Requests the agent passed to a person: watch for their decision.
+      const requests = final
+        ? toolCallsOf(final).flatMap(({ name, output }) => {
+            const result = output as { status?: string; request_id?: number };
+            return name === "escalate_to_human" &&
+              result?.status === "escalated" &&
+              typeof result.request_id === "number"
+              ? [result.request_id]
+              : [];
+          })
+        : [];
+      if (requests.length) setWatching((ids) => [...ids, ...requests]);
+      onActivity?.();
     } catch {
       setProgress({
         steps: [],
@@ -118,6 +224,158 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
       });
     }
   }
+
+  const panel = (
+    <>
+      <header className="bg-chart-5 dark:bg-background text-white">
+        <div className="flex items-center gap-3 px-4 pt-4 pb-3">
+          <span className="bg-primary flex size-10 shrink-0 items-center justify-center rounded-full">
+            <MessageCircleIcon className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            {docked ? (
+              <h2 className="text-base font-bold text-white">Ask Copper</h2>
+            ) : (
+              <SheetTitle className="text-base font-bold text-white">
+                Ask Copper
+              </SheetTitle>
+            )}
+            {docked ? (
+              <p className="text-xs text-white/70">
+                Prices, stock and refunds, checked with tools.
+              </p>
+            ) : (
+              <SheetDescription className="text-xs text-white/70">
+                Prices, totals and stock, checked with tools.
+              </SheetDescription>
+            )}
+          </div>
+          {!docked && (
+            <SheetClose asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-white hover:bg-white/10 hover:text-white"
+              >
+                <XIcon />
+                <span className="sr-only">Close</span>
+              </Button>
+            </SheetClose>
+          )}
+        </div>
+        {aiConfigured && (
+          <div className="flex items-center gap-3 bg-white/10 px-4 py-2">
+            <div className="flex-1 text-sm">
+              <span className="font-semibold">Use tools</span>
+              <span className="ml-2 text-xs text-white/70">
+                {useTools ? "Checks every answer" : "Model guesses alone"}
+              </span>
+            </div>
+            <Switch
+              aria-label="Use tools"
+              checked={useTools}
+              onCheckedChange={setUseTools}
+            />
+          </div>
+        )}
+      </header>
+
+      {aiConfigured ? (
+        <>
+          <div
+            ref={body}
+            className="bg-secondary flex-1 space-y-6 overflow-y-auto px-4 py-5"
+          >
+            {turns.map((turn, i) =>
+              turn.notice ? (
+                <div
+                  key={i}
+                  data-testid="refund-notice"
+                  className="bg-card ml-2 rounded-2xl rounded-tl-sm border p-4 shadow-xs"
+                >
+                  <p className="text-primary mb-1 text-xs font-bold">
+                    Copper Refund agent
+                  </p>
+                  <p className="whitespace-pre-wrap">{turn.progress.reply}</p>
+                </div>
+              ) : (
+                <div key={i} className="space-y-4">
+                  <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
+                    {turn.question}
+                  </p>
+                  <Answer progress={turn.progress} useTools={useTools} />
+                </div>
+              ),
+            )}
+            {!busy && (
+              <div className="space-y-2">
+                {turns.length === 0 && (
+                  <p className="text-muted-foreground text-sm">
+                    Hi, I&apos;m Copper! Ask me about prices, totals or stock.
+                    Try one of these:
+                  </p>
+                )}
+                {[...STARTERS, ...(docked ? REFUND_STARTERS : [])].map(
+                  (starter) => (
+                    <button
+                      key={starter}
+                      type="button"
+                      onClick={() => send(starter)}
+                      className="bg-background hover:border-primary block w-full rounded-xl border px-3 py-2 text-left text-sm transition-colors"
+                    >
+                      {starter}
+                    </button>
+                  ),
+                )}
+              </div>
+            )}
+          </div>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              send(draft);
+            }}
+            className="bg-background flex items-center gap-2 border-t p-3"
+          >
+            <input
+              aria-label="Your question"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder={
+                docked
+                  ? "Ask about prices, stock or a refund…"
+                  : "Ask about prices or stock…"
+              }
+              className="bg-background focus-visible:ring-ring h-10 flex-1 rounded-full border px-4 text-sm outline-none focus-visible:ring-2"
+            />
+            <Button
+              type="submit"
+              size="icon"
+              aria-label="Send"
+              disabled={busy || !draft.trim()}
+              className="size-10 rounded-full"
+            >
+              <ArrowUpIcon />
+            </Button>
+          </form>
+        </>
+      ) : (
+        <div className="bg-secondary flex-1 overflow-y-auto px-4">
+          <SetupRequired service="ai" />
+        </div>
+      )}
+    </>
+  );
+
+  if (docked)
+    return (
+      <section
+        data-testid="ask-copper"
+        className="bg-secondary flex h-full min-h-0 flex-col overflow-hidden"
+      >
+        {panel}
+      </section>
+    );
 
   return (
     <>
@@ -139,112 +397,7 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
           showCloseButton={false}
           className="gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md"
         >
-          <header className="bg-chart-5 dark:bg-background text-white">
-            <div className="flex items-center gap-3 px-4 pt-4 pb-3">
-              <span className="bg-primary flex size-10 shrink-0 items-center justify-center rounded-full">
-                <MessageCircleIcon className="size-5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <SheetTitle className="text-base font-bold text-white">
-                  Ask Copper
-                </SheetTitle>
-                <SheetDescription className="text-xs text-white/70">
-                  Prices, totals and stock, checked with tools.
-                </SheetDescription>
-              </div>
-              <SheetClose asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-white hover:bg-white/10 hover:text-white"
-                >
-                  <XIcon />
-                  <span className="sr-only">Close</span>
-                </Button>
-              </SheetClose>
-            </div>
-            {aiConfigured && (
-              <div className="flex items-center gap-3 bg-white/10 px-4 py-2">
-                <div className="flex-1 text-sm">
-                  <span className="font-semibold">Use tools</span>
-                  <span className="ml-2 text-xs text-white/70">
-                    {useTools ? "Checks every answer" : "Model guesses alone"}
-                  </span>
-                </div>
-                <Switch
-                  aria-label="Use tools"
-                  checked={useTools}
-                  onCheckedChange={setUseTools}
-                />
-              </div>
-            )}
-          </header>
-
-          {aiConfigured ? (
-            <>
-              <div
-                ref={body}
-                className="bg-secondary flex-1 space-y-6 overflow-y-auto px-4 py-5"
-              >
-                {turns.map((turn, i) => (
-                  <div key={i} className="space-y-4">
-                    <p className="bg-primary text-primary-foreground ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2">
-                      {turn.question}
-                    </p>
-                    <Answer progress={turn.progress} useTools={useTools} />
-                  </div>
-                ))}
-                {!busy && (
-                  <div className="space-y-2">
-                    {turns.length === 0 && (
-                      <p className="text-muted-foreground text-sm">
-                        Hi, I&apos;m Copper! Ask me about prices, totals or
-                        stock. Try one of these:
-                      </p>
-                    )}
-                    {STARTERS.map((starter) => (
-                      <button
-                        key={starter}
-                        type="button"
-                        onClick={() => send(starter)}
-                        className="bg-background hover:border-primary block w-full rounded-xl border px-3 py-2 text-left text-sm transition-colors"
-                      >
-                        {starter}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  send(draft);
-                }}
-                className="bg-background flex items-center gap-2 border-t p-3"
-              >
-                <input
-                  aria-label="Your question"
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Ask about prices or stock…"
-                  className="bg-background focus-visible:ring-ring h-10 flex-1 rounded-full border px-4 text-sm outline-none focus-visible:ring-2"
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  aria-label="Send"
-                  disabled={busy || !draft.trim()}
-                  className="size-10 rounded-full"
-                >
-                  <ArrowUpIcon />
-                </Button>
-              </form>
-            </>
-          ) : (
-            <div className="bg-secondary flex-1 overflow-y-auto px-4">
-              <SetupRequired service="ai" />
-            </div>
-          )}
+          {panel}
         </SheetContent>
       </Sheet>
     </>
@@ -326,6 +479,24 @@ function Answer({
                 <InlineMarkdown text={step.text} />
               </p>
             </Station>
+          ) : step.type === "handoff" ? (
+            <Station
+              key={i}
+              node={<ArrowRightIcon className="size-3" />}
+              nodeClass="bg-chart-4"
+              label={
+                step.to === "refund"
+                  ? "Passed to the Copper Refund agent"
+                  : "Passed back to the Copper support agent"
+              }
+            >
+              <p
+                data-testid="handoff"
+                className="text-muted-foreground text-sm"
+              >
+                {step.summary}
+              </p>
+            </Station>
           ) : (
             <Station
               key={i}
@@ -368,7 +539,9 @@ function Answer({
 
       {(reply || !working) && (
         <div className="bg-card ml-2 rounded-2xl rounded-tl-sm border p-4 shadow-xs">
-          <p className="text-primary mb-1 text-xs font-bold">Copper</p>
+          <p className="text-primary mb-1 text-xs font-bold">
+            {progress.agent === "refund" ? "Copper Refund agent" : "Copper"}
+          </p>
           {!useTools && (
             <div className="border-chart-3 bg-chart-3/10 mb-3 rounded-lg border p-3 text-xs">
               <p className="flex items-center gap-1.5 font-bold">
@@ -486,7 +659,9 @@ function ToolCard({ step, number }: { step: ToolStep; number: number }) {
           tool {number}
         </span>
         <span className="ml-auto text-xs text-white/80">
-          {TOOL_LABELS[step.name] ?? "Using a tool"}
+          {TOOL_LABELS[step.name] ??
+            REFUND_TOOL_LABELS[step.name] ??
+            "Using a tool"}
         </span>
       </div>
       <div className="space-y-2 px-3 py-3">

@@ -1,0 +1,60 @@
+{
+  "orders": [
+    {
+      "order_id": "ord_1001",
+      "customer_id": "cust_demo",
+      "product": "Copper Home Charging Dock",
+      "price_usd": 39.99,
+      "days_ago": 10,
+      "status": "delivered"
+    },
+    {
+      "order_id": "ord_1002",
+      "customer_id": "cust_demo",
+      "product": "Copper Notes Clip Pack",
+      "price_usd": 24.99,
+      "days_ago": 45,
+      "status": "delivered"
+    },
+    {
+      "order_id": "ord_1003",
+      "customer_id": "cust_demo",
+      "product": "Copper Home",
+      "price_usd": 149,
+      "days_ago": 12,
+      "status": "delivered"
+    },
+    {
+      "order_id": "ord_1004",
+      "customer_id": "cust_demo",
+      "product": "Copper Notes",
+      "price_usd": 129,
+      "days_ago": 40,
+      "status": "delivered"
+    },
+    {
+      "order_id": "ord_1005",
+      "customer_id": "cust_demo",
+      "product": "Copper Notes Carry Sleeve",
+      "price_usd": 49.99,
+      "days_ago": 5,
+      "status": "delivered"
+    },
+    {
+      "order_id": "ord_1006",
+      "customer_id": "cust_demo",
+      "product": "Copper Home Wall Mount",
+      "price_usd": 50,
+      "days_ago": 3,
+      "status": "delivered"
+    },
+    {
+      "order_id": "ord_2001",
+      "customer_id": "cust_other",
+      "product": "Copper Notes Clip Pack",
+      "price_usd": 19.99,
+      "days_ago": 2,
+      "status": "delivered"
+    }
+  ]
+}

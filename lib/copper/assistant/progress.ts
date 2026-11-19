@@ -14,12 +14,21 @@ export type ToolStep = {
   output?: unknown;
 };
 
-export type Step = ThinkingStep | ToolStep;
+export type Step = ThinkingStep | ToolStep | HandoffStep;
+
+/** Which agent is answering. Handoffs add a "handoff" step in between. */
+export type HandoffStep = {
+  type: "handoff";
+  to: "support" | "refund";
+  summary: string;
+};
 
 export type Progress = {
   steps: Step[];
   reply: string;
   status: "working" | "done" | "error";
+  /** The agent that wrote the reply, and that the next question goes to. */
+  agent?: "support" | "refund";
 };
 
 /** Every tool call in an answer, in order. */
@@ -40,4 +49,24 @@ export const TOOL_LABELS: Record<string, string> = {
   calculate_cost: "Working out the cost",
   check_availability: "Checking stock",
   search_docs: "Searching the documents",
+  transfer_to_refund_agent: "Passing to the Refund agent",
+};
+
+/** Plain-English labels for the Copper Refund agent's tools. */
+export const REFUND_TOOL_LABELS: Record<string, string> = {
+  get_orders: "Looking up orders",
+  check_refund_policy: "Reading the refund rules",
+  check_refund_eligibility: "Checking eligibility",
+  issue_refund: "Issuing the refund",
+  escalate_to_human: "Passing to a person",
+  transfer_to_support_agent: "Back to support",
+};
+
+/** A manager's decision (or its absence) on a request the agent passed to a person. */
+export type RequestUpdate = {
+  id: number;
+  decision: "auto_approved" | "pending" | "approved" | "denied";
+  product: string;
+  amount_usd: number | null;
+  note: string | null;
 };
